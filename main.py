@@ -994,7 +994,7 @@ def clamp01(value: float, fallback: float = 0.0) -> float:
     "AstrBot",
     "AstrBot 持久化记忆插件（基于 memory-lancedb-pro 二次开发）",
     "0.2.0",
-    "https://github.com/win4r/memory-lancedb-pro",
+    "https://github.com/zhanzhao2/astrbot-plugin-persistent-memory",
 )
 class MemoryLanceDBPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | dict | None = None) -> None:
