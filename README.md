@@ -113,6 +113,26 @@
 3. 配置 `astrbot_plugin_memory_lancedb_config.json`。
 4. 重启 AstrBot 容器。
 
+## 与 AstrBot 内置功能的关系（避免冲突）
+
+建议关闭 AstrBot 内置的“群聊上下文感知（原聊天记忆增强）”，否则会与本插件同时向模型注入额外上下文，导致提示词重复、长度膨胀与回复漂移。
+
+建议关闭以下配置项：
+
+1. `provider_ltm_settings.group_icl_enable = false`
+2. `provider_ltm_settings.active_reply.enable = false`
+
+原因说明：
+
+1. 本插件会在 `on_llm_request` 中注入 `<relevant-memories>`，属于“长期记忆召回”。
+2. AstrBot 内置功能也会在请求前注入群聊历史，属于“群聊上下文感知”。
+3. 两者同时开启通常不会报错，但会出现“双重上下文叠加”，实际效果常见为：
+   - token 成本上升；
+   - 召回噪声变多；
+   - 回复稳定性下降（模型更容易被冗余上下文干扰）。
+
+如果你明确需要“两套能力同时开”，建议至少降低本插件 `recall_limit`，并优先关闭内置 `active_reply`。
+
 ## 与上游项目的关系
 
 本插件明确基于以下开源项目思路进行二次开发与 AstrBot 适配：
