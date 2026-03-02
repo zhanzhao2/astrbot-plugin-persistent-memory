@@ -1,0 +1,40 @@
+# Release Notes（中文）
+
+## v0.2.0（当前版本）
+
+本版本完成了 AstrBot 侧“持久化记忆插件”的中文化整理与能力增强，重点是让插件在生产场景下更稳定、更易理解。
+
+### 新增与优化
+
+1. 中文化整理完成：
+   - 插件名称统一为 **astrbot持久化记忆插件**
+   - `metadata.yaml`、`README.md`、变更说明均改为中文
+2. 召回链路增强：
+   - 新增 `auto_recall_min_length`，避免过短消息触发无效检索
+3. 捕获链路防污染：
+   - 自动过滤“删除/清理记忆”等管理意图，防止误写入长期记忆
+4. 混合检索稳健性提升：
+   - 增加 BM25 stale 命中校验，降低幽灵记忆风险
+5. 中文语义支持增强：
+   - 扩展中英（含繁体）触发词、分类词与召回跳过规则
+
+### 兼容性说明
+
+1. 仍使用 `jina-embeddings-v5-text-small` 作为默认嵌入模型。
+2. 仍使用 `jina-reranker-v2-base-multilingual` 作为默认重排模型。
+3. 持续兼容 LanceDB 持久化存储结构。
+
+## v0.1.0
+
+首个 AstrBot 可用版本，包含：
+
+1. 自动记忆捕获与自动记忆召回注入
+2. LanceDB 持久化存储
+3. 混合检索与重排序
+4. 记忆管理工具：
+   - `memory_recall`
+   - `memory_store`
+   - `memory_forget`
+   - `memory_list`
+   - `memory_stats`
+

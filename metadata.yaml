@@ -1,0 +1,5 @@
+name: astrbot持久化记忆插件
+desc: 基于 LanceDB 的 AstrBot 记忆持久化插件，支持自动记忆、混合检索与重排序
+version: v0.2.0
+author: AstrBot
+repo: https://github.com/win4r/memory-lancedb-pro

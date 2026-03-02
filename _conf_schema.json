@@ -1,0 +1,145 @@
+{
+  "embedding_api_key": {
+    "type": "string",
+    "description": "Jina API key for embedding and (optional) rerank",
+    "hint": "Will be moved to plugin KV store when store_api_key_in_kv=true",
+    "default": ""
+  },
+  "store_api_key_in_kv": {
+    "type": "bool",
+    "description": "Store API keys in plugin KV storage",
+    "default": true
+  },
+  "embedding_base_url": {
+    "type": "string",
+    "description": "OpenAI-compatible embeddings base URL",
+    "default": "https://api.jina.ai/v1"
+  },
+  "embedding_model": {
+    "type": "string",
+    "description": "Embedding model name",
+    "default": "jina-embeddings-v5-text-small"
+  },
+  "embedding_dimensions": {
+    "type": "int",
+    "description": "Embedding vector dimensions",
+    "default": 1024
+  },
+  "task_query": {
+    "type": "string",
+    "description": "Task label for query embedding",
+    "default": "retrieval.query"
+  },
+  "task_passage": {
+    "type": "string",
+    "description": "Task label for passage embedding",
+    "default": "retrieval.passage"
+  },
+  "embedding_normalized": {
+    "type": "bool",
+    "description": "Request normalized vectors from provider",
+    "default": true
+  },
+  "embedding_timeout_sec": {
+    "type": "int",
+    "description": "Embedding HTTP timeout in seconds",
+    "default": 30
+  },
+  "enable_rerank": {
+    "type": "bool",
+    "description": "Enable rerank stage after vector/BM25 retrieval",
+    "default": true
+  },
+  "rerank_api_key": {
+    "type": "string",
+    "description": "Reranker API key (empty = fallback to embedding_api_key)",
+    "default": ""
+  },
+  "rerank_model": {
+    "type": "string",
+    "description": "Rerank model name",
+    "default": "jina-reranker-v2-base-multilingual"
+  },
+  "rerank_endpoint": {
+    "type": "string",
+    "description": "Rerank endpoint URL",
+    "default": "https://api.jina.ai/v1/rerank"
+  },
+  "rerank_timeout_sec": {
+    "type": "int",
+    "description": "Rerank HTTP timeout in seconds",
+    "default": 8
+  },
+  "db_path": {
+    "type": "string",
+    "description": "Custom LanceDB path (empty = plugin data dir)",
+    "default": ""
+  },
+  "retrieval_mode": {
+    "type": "string",
+    "description": "Retrieval mode",
+    "default": "hybrid",
+    "options": ["hybrid", "vector"]
+  },
+  "scope_mode": {
+    "type": "string",
+    "description": "Memory scope strategy",
+    "default": "session+global",
+    "options": ["global", "session", "session+global"]
+  },
+  "auto_recall": {
+    "type": "bool",
+    "description": "Inject relevant memories in on_llm_request",
+    "default": true
+  },
+  "auto_recall_min_length": {
+    "type": "int",
+    "description": "Minimum prompt length to trigger auto recall (1-200).",
+    "default": 15
+  },
+  "recall_limit": {
+    "type": "int",
+    "description": "Number of memories injected each turn",
+    "default": 3
+  },
+  "auto_capture": {
+    "type": "bool",
+    "description": "Capture memory automatically in on_llm_response",
+    "default": true
+  },
+  "capture_assistant": {
+    "type": "bool",
+    "description": "Also capture assistant response when triggers match",
+    "default": false
+  },
+  "capture_per_turn": {
+    "type": "int",
+    "description": "Max stored memory items per turn",
+    "default": 3
+  },
+  "filter_noise": {
+    "type": "bool",
+    "description": "Filter noisy memories during retrieval",
+    "default": true
+  },
+  "candidate_pool_size": {
+    "type": "int",
+    "description": "Candidate pool size before rerank",
+    "default": 20
+  },
+  "recency_half_life_days": {
+    "type": "int",
+    "description": "Recency boost half-life in days",
+    "default": 14
+  },
+  "time_decay_half_life_days": {
+    "type": "int",
+    "description": "Time decay half-life in days",
+    "default": 60
+  },
+  "length_norm_anchor": {
+    "type": "int",
+    "description": "Length normalization anchor in chars",
+    "default": 500
+  }
+}
