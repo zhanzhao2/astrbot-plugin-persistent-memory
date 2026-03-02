@@ -991,7 +991,7 @@ def clamp01(value: float, fallback: float = 0.0) -> float:
 
 @register(
     PLUGIN_NAME,
-    "AstrBot",
+    "zhanzhao2",
     "AstrBot 持久化记忆插件（基于 memory-lancedb-pro 二次开发）",
     "0.2.0",
     "https://github.com/zhanzhao2/astrbot-plugin-persistent-memory",

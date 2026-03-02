@@ -130,6 +130,10 @@
 感谢 **win4r/memory-lancedb-pro** 提供的优秀开源实现与设计思路。  
 本项目为基于其架构思想的 AstrBot 二次开发适配版本。
 
+## 开源协议
+
+本项目采用 **MIT License**，详见仓库根目录 [LICENSE](./LICENSE)。
+
 ## Release（中文）
 
 ### v0.2.0
