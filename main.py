@@ -17,7 +17,7 @@ import lancedb
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
-from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.api.star import Context, Star, StarTools
 
 PLUGIN_NAME = "astrbot_plugin_memory_lancedb"
 TABLE_NAME = "memories"
@@ -989,13 +989,6 @@ def clamp01(value: float, fallback: float = 0.0) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-@register(
-    PLUGIN_NAME,
-    "zhanzhao2",
-    "AstrBot 持久化记忆插件（基于 memory-lancedb-pro 二次开发）",
-    "0.2.0",
-    "https://github.com/zhanzhao2/astrbot-plugin-persistent-memory",
-)
 class MemoryLanceDBPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | dict | None = None) -> None:
         super().__init__(context, config)
