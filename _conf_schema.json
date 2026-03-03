@@ -45,6 +45,11 @@
     "description": "Embedding HTTP timeout in seconds",
     "default": 30
   },
+  "embedding_chunking": {
+    "type": "bool",
+    "description": "Enable automatic chunking fallback when text exceeds embedding context length",
+    "default": true
+  },
   "enable_rerank": {
     "type": "bool",
     "description": "Enable rerank stage after vector/BM25 retrieval",

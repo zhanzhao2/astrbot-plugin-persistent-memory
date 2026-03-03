@@ -29,6 +29,21 @@ DEFAULT_RERANK_MODEL = "jina-reranker-v2-base-multilingual"
 
 MEMORY_CATEGORIES = {"preference", "fact", "decision", "entity", "other"}
 
+EMBEDDING_CONTEXT_LIMITS: dict[str, int] = {
+    "jina-embeddings-v5-text-small": 8192,
+    "jina-embeddings-v5-text-nano": 8192,
+    "text-embedding-3-small": 8192,
+    "text-embedding-3-large": 8192,
+    "text-embedding-004": 8192,
+    "gemini-embedding-001": 2048,
+    "nomic-embed-text": 8192,
+    "all-MiniLM-L6-v2": 512,
+    "all-mpnet-base-v2": 512,
+}
+
+CONTEXT_ERROR_PATTERN = re.compile(r"context|too long|exceed|length|token limit", re.IGNORECASE)
+SENTENCE_ENDING_CHARS = {".", "!", "?", "。", "！", "？"}
+
 # Auto-capture triggers
 MEMORY_TRIGGERS = [
     re.compile(r"remember|note this|don't forget|save this", re.IGNORECASE),
@@ -113,6 +128,158 @@ BOILERPLATE_PATTERNS = [
 ]
 
 
+def is_context_length_error(message: str) -> bool:
+    return bool(CONTEXT_ERROR_PATTERN.search(message or ""))
+
+
+def chunk_document_text(
+    text: str,
+    *,
+    max_chunk_size: int,
+    overlap_size: int,
+    min_chunk_size: int,
+    semantic_split: bool = True,
+    max_lines_per_chunk: int = 50,
+) -> list[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+
+    max_chunk_size = max(100, int(max_chunk_size))
+    overlap_size = max(0, int(overlap_size))
+    min_chunk_size = max(50, min(int(min_chunk_size), max_chunk_size))
+
+    chunks: list[str] = []
+    pos = 0
+    total_len = len(raw)
+    max_guard = max(4, math.ceil(total_len / max(1, max_chunk_size - overlap_size)) + 5)
+    guard = 0
+
+    while pos < total_len and guard < max_guard:
+        guard += 1
+        remaining = total_len - pos
+
+        if remaining <= max_chunk_size:
+            tail = raw[pos:].strip()
+            if tail:
+                chunks.append(tail)
+            break
+
+        max_end = min(pos + max_chunk_size, total_len)
+        min_end = min(pos + min_chunk_size, max_end)
+        split_end = max_end
+
+        if max_lines_per_chunk > 0:
+            line_breaks = 0
+            for i in range(pos, max_end):
+                if raw[i] == "\n":
+                    line_breaks += 1
+                    if line_breaks >= max_lines_per_chunk:
+                        split_end = max(i + 1, min_end)
+                        break
+
+        if semantic_split and split_end == max_end:
+            found_sentence = False
+            for i in range(max_end - 1, min_end - 1, -1):
+                if raw[i] in SENTENCE_ENDING_CHARS:
+                    j = i + 1
+                    while j < max_end and raw[j].isspace():
+                        j += 1
+                    split_end = j
+                    found_sentence = True
+                    break
+            if not found_sentence:
+                for i in range(max_end - 1, min_end - 1, -1):
+                    if raw[i] == "\n":
+                        split_end = i + 1
+                        found_sentence = True
+                        break
+
+        if split_end == max_end:
+            for i in range(max_end - 1, min_end - 1, -1):
+                if raw[i].isspace():
+                    split_end = i
+                    break
+
+        candidate = raw[pos:split_end].strip()
+        if len(candidate) < min_chunk_size:
+            hard_end = min(pos + max_chunk_size, total_len)
+            candidate = raw[pos:hard_end].strip()
+            if candidate:
+                chunks.append(candidate)
+            if hard_end >= total_len:
+                break
+            pos = max(hard_end - overlap_size, pos + 1)
+            continue
+
+        chunks.append(candidate)
+        if split_end >= total_len:
+            break
+        pos = max(split_end - overlap_size, pos + 1)
+
+    return chunks
+
+
+def smart_chunk_text(text: str, model_name: str) -> list[str]:
+    base = EMBEDDING_CONTEXT_LIMITS.get((model_name or "").strip(), 8192)
+    return chunk_document_text(
+        text,
+        max_chunk_size=max(1000, int(base * 0.7)),
+        overlap_size=max(0, int(base * 0.05)),
+        min_chunk_size=max(100, int(base * 0.1)),
+        semantic_split=True,
+        max_lines_per_chunk=50,
+    )
+
+
+def format_errno(exc: BaseException) -> str:
+    errno = getattr(exc, "errno", None)
+    if errno is None:
+        return ""
+    return f"[errno={errno}] "
+
+
+def validate_storage_path(db_path: Path) -> Path:
+    resolved = db_path.expanduser()
+
+    try:
+        if resolved.is_symlink():
+            resolved = resolved.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"db_path '{resolved}' 是一个无效符号链接，目标不存在。"
+            f" 请修复链接目标或改成有效目录。{format_errno(exc)}{exc}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"无法检查 db_path '{resolved}'。{format_errno(exc)}{exc}"
+        ) from exc
+
+    if not resolved.exists():
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"无法创建 db_path 目录 '{resolved}'。"
+                f" 请检查父目录权限。{format_errno(exc)}{exc}"
+            ) from exc
+
+    if not resolved.is_dir():
+        raise RuntimeError(f"db_path '{resolved}' 不是目录。请改为可写目录路径。")
+
+    try:
+        probe = resolved / f".write_probe_{uuid.uuid4().hex[:8]}"
+        with probe.open("w", encoding="utf-8") as fp:
+            fp.write("ok")
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"db_path '{resolved}' 不可写。请为当前用户授予写权限。{format_errno(exc)}{exc}"
+        ) from exc
+
+    return resolved
+
+
 @dataclass
 class MemoryEntry:
     id: str
@@ -149,6 +316,7 @@ class EmbeddingClient:
         task_passage: str = "retrieval.passage",
         normalized: bool = True,
         timeout_sec: int = 30,
+        auto_chunking: bool = True,
     ) -> None:
         self.api_key = api_key.strip()
         self.model = model.strip()
@@ -158,6 +326,7 @@ class EmbeddingClient:
         self.task_passage = task_passage.strip()
         self.normalized = bool(normalized)
         self.timeout_sec = max(5, int(timeout_sec or 30))
+        self.auto_chunking = bool(auto_chunking)
 
         self._cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
         self._cache_limit = 512
@@ -190,29 +359,27 @@ class EmbeddingClient:
     async def embed_passage(self, text: str) -> list[float]:
         return await self._embed(text, self.task_passage)
 
-    async def _embed(self, text: str, task: str) -> list[float]:
-        cleaned = (text or "").strip()
-        if not cleaned:
-            raise ValueError("empty text cannot be embedded")
-
-        cache_key = self._cache_key(cleaned, task)
-        cached = self._cache_get(cache_key)
-        if cached:
-            return cached
-
+    def _embedding_url(self) -> str:
         if self.base_url.endswith("/embeddings"):
-            url = self.base_url
-        else:
-            url = f"{self.base_url}/embeddings"
+            return self.base_url
+        return f"{self.base_url}/embeddings"
 
+    def _build_payload(self, text: str, task: str) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
-            "input": cleaned,
+            "input": text,
+            "encoding_format": "float",
         }
         if task:
             payload["task"] = task
         payload["normalized"] = self.normalized
+        if self.dimensions > 0:
+            payload["dimensions"] = self.dimensions
+        return payload
 
+    async def _embed_once(self, cleaned: str, task: str) -> list[float]:
+        url = self._embedding_url()
+        payload = self._build_payload(cleaned, task)
         timeout = aiohttp.ClientTimeout(total=self.timeout_sec)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -240,6 +407,53 @@ class EmbeddingClient:
             raise RuntimeError(
                 f"embedding dimension mismatch: expected {self.dimensions}, got {len(vector)}"
             )
+        return vector
+
+    async def _embed(self, text: str, task: str) -> list[float]:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            raise ValueError("empty text cannot be embedded")
+
+        cache_key = self._cache_key(cleaned, task)
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
+
+        try:
+            vector = await self._embed_once(cleaned, task)
+        except Exception as exc:
+            msg = str(exc)
+            if not self.auto_chunking or not is_context_length_error(msg):
+                raise
+
+            chunks = smart_chunk_text(cleaned, self.model)
+            if len(chunks) <= 1:
+                raise RuntimeError(
+                    f"embedding context too long but chunking produced no usable splits: {msg[:300]}"
+                ) from exc
+
+            logger.info(
+                f"{PLUGIN_NAME}: embedding text exceeded context limit; "
+                f"fallback to chunking ({len(chunks)} chunks)"
+            )
+
+            vectors: list[list[float]] = []
+            for idx, chunk in enumerate(chunks, start=1):
+                try:
+                    vectors.append(await self._embed(chunk, task))
+                except Exception as chunk_exc:
+                    raise RuntimeError(
+                        f"failed to embed chunk {idx}/{len(chunks)}: {chunk_exc}"
+                    ) from chunk_exc
+
+            dim = len(vectors[0])
+            merged = [0.0 for _ in range(dim)]
+            for vec in vectors:
+                if len(vec) != dim:
+                    raise RuntimeError("chunk embeddings returned inconsistent dimensions")
+                for i, value in enumerate(vec):
+                    merged[i] += value
+            vector = [value / len(vectors) for value in merged]
 
         self._cache_set(cache_key, vector)
         return vector
@@ -252,6 +466,7 @@ class LanceMemoryStore:
         self._db = None
         self._table = None
         self._fts_enabled = False
+        self._resolved_db_path: Path | None = None
 
     @staticmethod
     def _escape(value: str) -> str:
@@ -280,8 +495,16 @@ class LanceMemoryStore:
         if self._table is not None:
             return
 
-        self.db_path.mkdir(parents=True, exist_ok=True)
-        self._db = lancedb.connect(str(self.db_path))
+        resolved_path = validate_storage_path(self.db_path)
+        self._resolved_db_path = resolved_path
+
+        try:
+            self._db = lancedb.connect(str(resolved_path))
+        except Exception as exc:
+            raise RuntimeError(
+                f"无法打开 LanceDB 路径 '{resolved_path}'。"
+                f" 请检查目录权限与可写性。{format_errno(exc)}{exc}"
+            ) from exc
 
         try:
             table = self._db.open_table(TABLE_NAME)
@@ -296,7 +519,13 @@ class LanceMemoryStore:
                 "timestamp": 0,
                 "metadata": "{}",
             }
-            table = self._db.create_table(TABLE_NAME, data=[schema_entry])
+            try:
+                table = self._db.create_table(TABLE_NAME, data=[schema_entry])
+            except Exception as exc:
+                raise RuntimeError(
+                    f"无法在 '{resolved_path}' 创建数据表 '{TABLE_NAME}'。"
+                    f" 请确认路径可写并且未被损坏。{format_errno(exc)}{exc}"
+                ) from exc
             try:
                 table.delete("id = '__schema__'")
             except Exception:
@@ -352,7 +581,14 @@ class LanceMemoryStore:
             timestamp=int(time.time() * 1000),
             metadata=entry.get("metadata", "{}"),
         )
-        self._table.add([full.__dict__])
+        try:
+            self._table.add([full.__dict__])
+        except Exception as exc:
+            target = str(self._resolved_db_path or self.db_path)
+            raise RuntimeError(
+                f"写入记忆失败，数据库路径 '{target}' 可能不可写或异常。"
+                f"{format_errno(exc)}{exc}"
+            ) from exc
         return full
 
     def vector_search(
@@ -1085,6 +1321,7 @@ class MemoryLanceDBPlugin(Star):
             task_passage = str(self._cfg("task_passage", "retrieval.passage") or "retrieval.passage")
             normalized = bool(self._cfg("embedding_normalized", True))
             embed_timeout = int(self._cfg("embedding_timeout_sec", 30) or 30)
+            embed_chunking = bool(self._cfg("embedding_chunking", True))
 
             try:
                 data_dir = StarTools.get_data_dir(PLUGIN_NAME)
@@ -1094,6 +1331,13 @@ class MemoryLanceDBPlugin(Star):
 
             db_path_cfg = str(self._cfg("db_path", "") or "").strip()
             db_path = Path(db_path_cfg).expanduser() if db_path_cfg else data_dir / "lancedb"
+            try:
+                db_path = validate_storage_path(db_path)
+            except Exception as exc:
+                logger.warning(
+                    f"{PLUGIN_NAME}: db_path preflight validation warning ({exc}). "
+                    "plugin will continue and retry during first database operation."
+                )
 
             self._embedder = EmbeddingClient(
                 api_key=embedding_api_key,
@@ -1104,6 +1348,7 @@ class MemoryLanceDBPlugin(Star):
                 task_passage=task_passage,
                 normalized=normalized,
                 timeout_sec=embed_timeout,
+                auto_chunking=embed_chunking,
             )
             self._store = LanceMemoryStore(db_path=db_path, vector_dim=embed_dims)
 
