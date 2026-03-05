@@ -1,6 +1,26 @@
 # Release Notes（中文）
 
-## v0.4.0（当前版本）
+## v0.4.1（当前版本）
+
+本版本对 v0.4.0 做“官方行为补齐”，重点收敛到上游真实提交的语义一致性：
+
+### 补齐项
+
+1. 对齐上游 `v1.0.26`（访问强化衰减）：
+   - 新增 `reinforcement_factor`（默认 `0.5`）和 `max_half_life_multiplier`（默认 `3`）
+   - `time decay` 读取记忆 metadata 中的 `accessCount/lastAccessedAt` 计算有效 half-life
+   - `memory_recall`（手动检索）触发访问统计持久化写回（debounce flush）
+2. 对齐上游 `v1.0.28`（autoRecall 去重）：
+   - 新增 `auto_recall_min_repeated`（默认 `0`），按会话“轮次”控制同一记忆重复注入间隔
+3. 对齐上游 `v1.0.29`（查询归一化）：
+   - `normalize_retrieval_query` 补齐对 `Conversation info/Sender (untrusted metadata)` 与 `[cron:...]` 包装清洗
+
+### 兼容性说明
+
+1. 对已有 LanceDB 表结构保持兼容，不需要重建库。
+2. 新增参数均提供默认值，旧配置可直接运行。
+
+## v0.4.0
 
 本版本对齐上游 `memory-lancedb-pro` 的 v1.0.24 / v1.0.25 / v1.0.26 / v1.0.28 / v1.0.29 / v1.0.30：
 

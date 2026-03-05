@@ -43,6 +43,7 @@ EMBEDDING_CONTEXT_LIMITS: dict[str, int] = {
 
 CONTEXT_ERROR_PATTERN = re.compile(r"context|too long|exceed|length|token limit", re.IGNORECASE)
 SENTENCE_ENDING_CHARS = {".", "!", "?", "。", "！", "？"}
+ACCESS_DECAY_HALF_LIFE_DAYS = 30.0
 
 # Auto-capture triggers
 MEMORY_TRIGGERS = [
@@ -673,6 +674,32 @@ class LanceMemoryStore:
         ).limit(1).to_list()
         return len(rows) > 0
 
+    def get_by_id(self, memory_id: str) -> MemoryEntry | None:
+        self.ensure_initialized()
+        target = (memory_id or "").strip()
+        if not target:
+            return None
+        rows = self._table.search().where(f"id = '{self._escape(target)}'").limit(1).to_list()
+        if not rows:
+            return None
+        return self._to_entry(rows[0])
+
+    def update_metadata(self, memory_id: str, metadata: str) -> bool:
+        self.ensure_initialized()
+        target = (memory_id or "").strip()
+        if not target:
+            return False
+        safe_metadata = (metadata or "{}").strip() or "{}"
+        try:
+            self._table.update(
+                where=f"id = '{self._escape(target)}'",
+                values={"metadata": safe_metadata},
+            )
+            return True
+        except Exception as exc:
+            logger.warning(f"{PLUGIN_NAME}: failed to update metadata for {target[:8]} ({exc})")
+            return False
+
     def store(self, entry: OmitMemoryEntry) -> MemoryEntry:
         self.ensure_initialized()
 
@@ -876,6 +903,8 @@ class MemoryRetriever:
         rerank_model: str = DEFAULT_RERANK_MODEL,
         rerank_endpoint: str = DEFAULT_RERANK_ENDPOINT,
         rerank_timeout_sec: int = 8,
+        reinforcement_factor: float = 0.5,
+        max_half_life_multiplier: float = 3.0,
         access_boost_weight: float = 0.08,
     ) -> None:
         self.store = store
@@ -898,6 +927,8 @@ class MemoryRetriever:
         self.rerank_model = rerank_model.strip() or DEFAULT_RERANK_MODEL
         self.rerank_endpoint = rerank_endpoint.strip() or DEFAULT_RERANK_ENDPOINT
         self.rerank_timeout_sec = max(3, int(rerank_timeout_sec or 8))
+        self.reinforcement_factor = max(0.0, min(2.0, float(reinforcement_factor)))
+        self.max_half_life_multiplier = max(1.0, min(10.0, float(max_half_life_multiplier)))
         self.access_boost_weight = max(0.0, min(0.3, float(access_boost_weight)))
         self._access_stats: OrderedDict[str, tuple[int, float]] = OrderedDict()
         self._access_stats_limit = 5000
@@ -1230,7 +1261,15 @@ class MemoryRetriever:
 
         for item in items:
             age_days = max(0.0, (now_ms - item.entry.timestamp) / 86_400_000)
-            factor = 0.5 + 0.5 * math.exp(-age_days / self.time_decay_half_life_days)
+            access_count, last_accessed_at = parse_access_metadata(item.entry.metadata)
+            effective_half_life = compute_effective_half_life(
+                self.time_decay_half_life_days,
+                access_count,
+                last_accessed_at,
+                self.reinforcement_factor,
+                self.max_half_life_multiplier,
+            )
+            factor = 0.5 + 0.5 * math.exp(-age_days / max(0.001, effective_half_life))
             decayed.append(
                 RetrievalResult(
                     entry=item.entry,
@@ -1359,6 +1398,19 @@ def normalize_retrieval_query(text: str) -> str:
     if not q:
         return q
 
+    # Strip OpenClaw metadata wrappers (v1.0.29 upstream behavior).
+    if re.match(r"^(Conversation info|Sender)\s*\(untrusted metadata\):", q, flags=re.IGNORECASE):
+        q = re.sub(
+            r"^(Conversation info|Sender)\s*\(untrusted metadata\):\s*",
+            "",
+            q,
+            flags=re.IGNORECASE,
+        )
+        parts = re.split(r"\n\s*\n", q, maxsplit=1)
+        if len(parts) == 2:
+            q = parts[1].strip()
+    # Strip OpenClaw cron wrapper prefix.
+    q = re.sub(r"^\[cron:[^\]]+\]\s*", "", q, flags=re.IGNORECASE)
     # Strip OpenClaw-style timestamp wrappers: "[Mon 2026-03-02 04:21 GMT+8] ..."
     q = re.sub(r"^\[[A-Za-z]{3}\s+\d{4}-\d{2}-\d{2}[^\]]*\]\s*", "", q)
     # Strip simple role prefixes often carried by relay/chat logs.
@@ -1376,6 +1428,65 @@ def normalize_retrieval_query(text: str) -> str:
     q = q.replace("\r", " ").replace("\n", " ")
     q = re.sub(r"\s+", " ", q).strip()
     return q
+
+
+def _parse_metadata_obj(metadata: str | None) -> dict[str, Any]:
+    raw = (metadata or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    if isinstance(parsed, dict):
+        return dict(parsed)
+    return {}
+
+
+def parse_access_metadata(metadata: str | None) -> tuple[int, int]:
+    obj = _parse_metadata_obj(metadata)
+    raw_count = obj.get("accessCount", 0)
+    raw_last = obj.get("lastAccessedAt", 0)
+
+    count = int(raw_count) if isinstance(raw_count, (int, float)) else 0
+    last_ts = int(raw_last) if isinstance(raw_last, (int, float)) else 0
+
+    count = max(0, min(count, 10_000))
+    last_ts = max(0, last_ts)
+    return count, last_ts
+
+
+def build_updated_metadata(existing_metadata: str | None, access_delta: int) -> str:
+    obj = _parse_metadata_obj(existing_metadata)
+    prev_count, _ = parse_access_metadata(existing_metadata)
+    safe_delta = max(0, int(access_delta))
+    new_count = max(0, min(prev_count + safe_delta, 10_000))
+    obj["accessCount"] = new_count
+    obj["lastAccessedAt"] = int(time.time() * 1000)
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def compute_effective_half_life(
+    base_half_life_days: float,
+    access_count: int,
+    last_accessed_at_ms: int,
+    reinforcement_factor: float,
+    max_half_life_multiplier: float,
+) -> float:
+    base = max(0.001, float(base_half_life_days))
+    factor = max(0.0, float(reinforcement_factor))
+    multiplier = max(1.0, float(max_half_life_multiplier))
+    if factor <= 0 or access_count <= 0:
+        return base
+
+    now_ms = int(time.time() * 1000)
+    age_days = max(0.0, (now_ms - max(0, int(last_accessed_at_ms))) / 86_400_000)
+    access_freshness = math.exp(-age_days * (math.log(2) / ACCESS_DECAY_HALF_LIFE_DAYS))
+    effective_access_count = max(0.0, float(access_count) * access_freshness)
+
+    extension = base * factor * math.log1p(effective_access_count)
+    cap = base * multiplier
+    return min(base + extension, cap)
 
 
 def sanitize_for_context(text: str) -> str:
@@ -1442,6 +1553,11 @@ class MemoryLanceDBPlugin(Star):
         self._embedding_api_keys_cache: list[str] | None = None
         self._rerank_api_key_cache: str | None = None
         self._recent_recall_history: dict[str, OrderedDict[str, float]] = {}
+        self._recent_recall_turn_history: dict[str, OrderedDict[str, int]] = {}
+        self._session_turn_counter: OrderedDict[str, int] = OrderedDict()
+        self._access_pending: OrderedDict[str, int] = OrderedDict()
+        self._access_flush_task: asyncio.Task | None = None
+        self._access_flush_lock = asyncio.Lock()
 
         logger.info(f"{PLUGIN_NAME}: initialized")
 
@@ -1622,6 +1738,8 @@ class MemoryLanceDBPlugin(Star):
                 rerank_model=str(self._cfg("rerank_model", DEFAULT_RERANK_MODEL) or DEFAULT_RERANK_MODEL),
                 rerank_endpoint=str(self._cfg("rerank_endpoint", DEFAULT_RERANK_ENDPOINT) or DEFAULT_RERANK_ENDPOINT),
                 rerank_timeout_sec=int(self._cfg("rerank_timeout_sec", 8) or 8),
+                reinforcement_factor=float(self._cfg("reinforcement_factor", 0.5) or 0.5),
+                max_half_life_multiplier=float(self._cfg("max_half_life_multiplier", 3) or 3),
                 access_boost_weight=float(self._cfg("access_boost_weight", 0.08) or 0.08),
             )
 
@@ -1668,7 +1786,7 @@ class MemoryLanceDBPlugin(Star):
         now: float,
         window_sec: float,
         max_size: int,
-    ) -> None:
+        ) -> None:
         if window_sec > 0:
             expired = [mid for mid, ts in bucket.items() if now - ts > window_sec]
             for mid in expired:
@@ -1676,57 +1794,153 @@ class MemoryLanceDBPlugin(Star):
         while len(bucket) > max_size:
             bucket.popitem(last=False)
 
+    @staticmethod
+    def _prune_recent_turn_bucket(bucket: OrderedDict[str, int], *, max_size: int) -> None:
+        while len(bucket) > max_size:
+            bucket.popitem(last=False)
+
+    def _next_turn_index(self, event: AstrMessageEvent) -> int:
+        key = event.unified_msg_origin
+        turn = int(self._session_turn_counter.get(key, 0)) + 1
+        self._session_turn_counter[key] = turn
+        self._session_turn_counter.move_to_end(key)
+        self._prune_recent_turn_bucket(self._session_turn_counter, max_size=2000)
+        return turn
+
+    def _schedule_access_flush(self, delay_sec: float = 5.0) -> None:
+        if self._access_flush_task and not self._access_flush_task.done():
+            return
+        self._access_flush_task = asyncio.create_task(self._flush_access_updates_after_delay(delay_sec))
+
+    async def _flush_access_updates_after_delay(self, delay_sec: float) -> None:
+        try:
+            await asyncio.sleep(max(0.0, float(delay_sec)))
+            await self._flush_access_updates()
+        except Exception as exc:
+            logger.warning(f"{PLUGIN_NAME}: access reinforcement task failed ({exc})")
+
+    async def _flush_access_updates(self) -> None:
+        if self._store is None:
+            return
+
+        async with self._access_flush_lock:
+            if not self._access_pending:
+                return
+            batch = list(self._access_pending.items())
+            self._access_pending.clear()
+
+        retry: OrderedDict[str, int] = OrderedDict()
+        for mem_id, delta in batch:
+            try:
+                entry = self._store.get_by_id(mem_id)
+                if not entry:
+                    continue
+                merged_metadata = build_updated_metadata(entry.metadata, int(delta))
+                ok = self._store.update_metadata(mem_id, merged_metadata)
+                if not ok:
+                    retry[mem_id] = retry.get(mem_id, 0) + int(delta)
+            except Exception as exc:
+                logger.warning(
+                    f"{PLUGIN_NAME}: access reinforcement flush failed for {mem_id[:8]} ({exc})"
+                )
+                retry[mem_id] = retry.get(mem_id, 0) + int(delta)
+
+        if retry:
+            async with self._access_flush_lock:
+                for mem_id, delta in retry.items():
+                    self._access_pending[mem_id] = self._access_pending.get(mem_id, 0) + int(delta)
+                    self._access_pending.move_to_end(mem_id)
+                self._prune_recent_turn_bucket(self._access_pending, max_size=5000)
+            self._schedule_access_flush(8.0)
+
+    def _record_manual_recall_access(self, memory_ids: list[str]) -> None:
+        if not memory_ids:
+            return
+        for mem_id in memory_ids:
+            mid = (mem_id or "").strip()
+            if not mid:
+                continue
+            self._access_pending[mid] = self._access_pending.get(mid, 0) + 1
+            self._access_pending.move_to_end(mid)
+        self._prune_recent_turn_bucket(self._access_pending, max_size=5000)
+        self._schedule_access_flush(5.0)
+
     def _filter_recent_recalls(
         self,
         event: AstrMessageEvent,
         results: list[RetrievalResult],
+        *,
+        current_turn: int,
     ) -> list[RetrievalResult]:
-        if not bool(self._cfg("recall_cross_turn_dedup", True)):
-            return results
         if not results:
             return results
 
-        window_sec = max(0, int(self._cfg("recall_dedup_window_sec", 600) or 600))
-        if window_sec <= 0:
-            return results
-
         key = event.unified_msg_origin
-        bucket = self._recent_recall_history.setdefault(key, OrderedDict())
-        now = time.time()
-        self._prune_recent_recall_bucket(
-            bucket,
-            now=now,
-            window_sec=float(window_sec),
-            max_size=500,
-        )
-        return [item for item in results if item.entry.id not in bucket]
+        filtered = results
+
+        # v1.0.28 upstream behavior: turn-based minimum repeated gap.
+        min_repeated = max(0, int(self._cfg("auto_recall_min_repeated", 0) or 0))
+        if min_repeated > 0:
+            turn_bucket = self._recent_recall_turn_history.setdefault(key, OrderedDict())
+            filtered = [
+                item
+                for item in filtered
+                if current_turn - int(turn_bucket.get(item.entry.id, -1000000)) >= min_repeated
+            ]
+
+        if not filtered:
+            return filtered
+
+        # Keep existing time-window dedup as an optional stricter guard.
+        if bool(self._cfg("recall_cross_turn_dedup", True)):
+            window_sec = max(0, int(self._cfg("recall_dedup_window_sec", 600) or 600))
+            if window_sec > 0:
+                bucket = self._recent_recall_history.setdefault(key, OrderedDict())
+                now = time.time()
+                self._prune_recent_recall_bucket(
+                    bucket,
+                    now=now,
+                    window_sec=float(window_sec),
+                    max_size=500,
+                )
+                filtered = [item for item in filtered if item.entry.id not in bucket]
+
+        return filtered
 
     def _mark_recent_recalls(
         self,
         event: AstrMessageEvent,
         results: list[RetrievalResult],
+        *,
+        current_turn: int,
     ) -> None:
-        if not bool(self._cfg("recall_cross_turn_dedup", True)):
-            return
         if not results:
             return
 
-        window_sec = max(0, int(self._cfg("recall_dedup_window_sec", 600) or 600))
-        if window_sec <= 0:
-            return
-
         key = event.unified_msg_origin
-        bucket = self._recent_recall_history.setdefault(key, OrderedDict())
-        now = time.time()
-        for item in results:
-            bucket[item.entry.id] = now
-            bucket.move_to_end(item.entry.id)
-        self._prune_recent_recall_bucket(
-            bucket,
-            now=now,
-            window_sec=float(window_sec),
-            max_size=500,
-        )
+        min_repeated = max(0, int(self._cfg("auto_recall_min_repeated", 0) or 0))
+        if min_repeated > 0:
+            turn_bucket = self._recent_recall_turn_history.setdefault(key, OrderedDict())
+            for item in results:
+                turn_bucket[item.entry.id] = int(current_turn)
+                turn_bucket.move_to_end(item.entry.id)
+            self._prune_recent_turn_bucket(turn_bucket, max_size=500)
+
+        if bool(self._cfg("recall_cross_turn_dedup", True)):
+            window_sec = max(0, int(self._cfg("recall_dedup_window_sec", 600) or 600))
+            if window_sec <= 0:
+                return
+            bucket = self._recent_recall_history.setdefault(key, OrderedDict())
+            now = time.time()
+            for item in results:
+                bucket[item.entry.id] = now
+                bucket.move_to_end(item.entry.id)
+            self._prune_recent_recall_bucket(
+                bucket,
+                now=now,
+                window_sec=float(window_sec),
+                max_size=500,
+            )
 
     async def _store_memory(
         self,
@@ -1805,6 +2019,7 @@ class MemoryLanceDBPlugin(Star):
             return
 
         try:
+            current_turn = self._next_turn_index(event)
             scope_filter = self._resolve_scope_filter(event)
             recall_limit = max(1, min(int(self._cfg("recall_limit", 3) or 3), 10))
             results = await self._retriever.retrieve(
@@ -1812,7 +2027,7 @@ class MemoryLanceDBPlugin(Star):
                 limit=recall_limit,
                 scopes=scope_filter,
             )
-            results = self._filter_recent_recalls(event, results)
+            results = self._filter_recent_recalls(event, results, current_turn=current_turn)
             if not results:
                 return
 
@@ -1840,8 +2055,7 @@ class MemoryLanceDBPlugin(Star):
             else:
                 req.system_prompt = injection
 
-            self._mark_recent_recalls(event, results)
-            self._retriever.register_access([item.entry.id for item in results])
+            self._mark_recent_recalls(event, results, current_turn=current_turn)
             logger.info(
                 f"{PLUGIN_NAME}: injected {len(results)} memories for {event.unified_msg_origin}"
             )
@@ -1952,7 +2166,9 @@ class MemoryLanceDBPlugin(Star):
             if not results:
                 return "No relevant memories found."
 
-            self._retriever.register_access([item.entry.id for item in results])
+            memory_ids = [item.entry.id for item in results]
+            self._retriever.register_access(memory_ids)
+            self._record_manual_recall_access(memory_ids)
             lines = []
             for idx, item in enumerate(results, 1):
                 lines.append(

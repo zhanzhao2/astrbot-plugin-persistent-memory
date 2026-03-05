@@ -68,8 +68,9 @@
 2. `importance weight`：高重要度优先。
 3. `length normalization`：抑制超长文本“碾压”。
 4. `time decay`：陈旧信息逐步衰减。
-5. `hard_min_score`：硬阈值过滤。
-6. `noise filter` 与去重。
+5. `access reinforcement`：手动召回会累计 `accessCount/lastAccessedAt`，用于延长有效 half-life（对齐上游 v1.0.26）。
+6. `hard_min_score`：硬阈值过滤。
+7. `noise filter` 与去重。
 
 ### 4) 幽灵记忆防护
 
@@ -92,13 +93,16 @@
 7. `scope_mode`：`global` / `session` / `session+global`。
 8. `auto_recall`：是否自动召回注入。
 9. `auto_recall_min_length`：自动召回最小触发长度。
-10. `recall_cross_turn_dedup`：跨轮次去重，避免连续注入同一条记忆。
-11. `recall_dedup_window_sec`：跨轮次去重窗口（秒）。
-12. `access_boost_weight`：访问强化排序权重（建议 `0.0~0.3`，默认 `0.08`）。
-13. `auto_capture`：是否自动捕获记忆。
-14. `capture_assistant`：是否捕获助手回复。
-15. `recall_limit`：每轮注入记忆条数上限。
-16. `embedding_chunking`：嵌入超长文本时是否自动分块并做均值向量（默认开启）。
+10. `auto_recall_min_repeated`：同一会话内同一记忆最小重复注入轮数间隔（对齐上游 v1.0.28）。
+11. `recall_cross_turn_dedup`：跨轮次去重，避免连续注入同一条记忆。
+12. `recall_dedup_window_sec`：跨轮次去重窗口（秒）。
+13. `reinforcement_factor`：访问强化因子（`0.0~2.0`，默认 `0.5`）。
+14. `max_half_life_multiplier`：访问强化后 half-life 上限倍数（`1.0~10.0`，默认 `3`）。
+15. `access_boost_weight`：访问强化排序权重（建议 `0.0~0.3`，默认 `0.08`）。
+16. `auto_capture`：是否自动捕获记忆。
+17. `capture_assistant`：是否捕获助手回复。
+18. `recall_limit`：每轮注入记忆条数上限。
+19. `embedding_chunking`：嵌入超长文本时是否自动分块并做均值向量（默认开启）。
 
 `db_path` 在初始化时会做预校验（目录自动创建、可写性检查、符号链接检查），失败时会给出可操作的错误信息，便于快速排障。
 

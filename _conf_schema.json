@@ -113,6 +113,11 @@
     "description": "Minimum prompt length to trigger auto recall (1-200).",
     "default": 15
   },
+  "auto_recall_min_repeated": {
+    "type": "int",
+    "description": "Minimum turns before the same memory can be re-injected in one session (0=off)",
+    "default": 0
+  },
   "recall_cross_turn_dedup": {
     "type": "bool",
     "description": "Avoid injecting the same memory repeatedly across nearby turns",
@@ -152,6 +157,16 @@
     "type": "int",
     "description": "Candidate pool size before rerank",
     "default": 20
+  },
+  "reinforcement_factor": {
+    "type": "string",
+    "description": "Access reinforcement factor for time decay (0.0-2.0)",
+    "default": "0.5"
+  },
+  "max_half_life_multiplier": {
+    "type": "string",
+    "description": "Max half-life multiplier for reinforcement (1.0-10.0)",
+    "default": "3"
   },
   "access_boost_weight": {
     "type": "string",

@@ -1,5 +1,13 @@
 # 变更记录
 
+## v0.4.1
+
+1. 严格对齐上游 v1.0.26：补齐 `reinforcement_factor` / `max_half_life_multiplier`，在 time-decay 中按 `accessCount/lastAccessedAt` 计算有效 half-life。
+2. 严格对齐上游 v1.0.26：手动 `memory_recall` 结果写回访问元数据（debounce flush），不再在 auto-recall 中记录访问强化。
+3. 严格对齐上游 v1.0.28：新增 `auto_recall_min_repeated`（按会话轮次去重间隔，默认 0）。
+4. 严格对齐上游 v1.0.29：`normalize_retrieval_query` 增强，补齐 `Conversation info/Sender (untrusted metadata)` 与 `[cron:...]` 清洗。
+5. 同步补齐配置与文档字段，确保实现与说明一致。
+
 ## v0.4.0
 
 1. 合并上游 v1.0.24 / v1.0.25 思路：新增 `embedding_api_keys` 多 Key 轮转与 `retry_on_rate_limit` 限流重试切换。
