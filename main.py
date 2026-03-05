@@ -305,11 +305,36 @@ class RetrievalResult:
     sources: dict[str, dict[str, float | int]]
 
 
+class EmbeddingRequestError(RuntimeError):
+    def __init__(self, status: int, detail: str) -> None:
+        self.status = int(status)
+        self.detail = (detail or "").strip()
+        super().__init__(f"embedding request failed ({self.status}): {self.detail[:300]}")
+
+    @property
+    def is_rate_limited(self) -> bool:
+        if self.status == 429:
+            return True
+        lower = self.detail.lower()
+        return any(
+            token in lower
+            for token in (
+                "rate limit",
+                "too many requests",
+                "quota",
+                "exceed",
+                "limit reached",
+                "request throttled",
+            )
+        )
+
+
 class EmbeddingClient:
     def __init__(
         self,
         api_key: str,
         model: str,
+        api_keys: list[str] | None = None,
         base_url: str = DEFAULT_EMBED_BASE_URL,
         dimensions: int = 0,
         task_query: str = "retrieval.query",
@@ -317,8 +342,17 @@ class EmbeddingClient:
         normalized: bool = True,
         timeout_sec: int = 30,
         auto_chunking: bool = True,
+        retry_on_rate_limit: bool = True,
     ) -> None:
-        self.api_key = api_key.strip()
+        clean_keys = self._normalize_api_keys([api_key, *(api_keys or [])])
+        if not clean_keys:
+            raise ValueError("at least one embedding_api_key is required")
+
+        self.api_keys = clean_keys
+        self.api_key = clean_keys[0]
+        self.retry_on_rate_limit = bool(retry_on_rate_limit)
+        self._key_cursor = 0
+
         self.model = model.strip()
         self.base_url = base_url.rstrip("/")
         self.dimensions = max(0, int(dimensions or 0))
@@ -331,6 +365,26 @@ class EmbeddingClient:
         self._cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
         self._cache_limit = 512
         self._cache_ttl_sec = 1800
+
+    @staticmethod
+    def _normalize_api_keys(raw_keys: list[str]) -> list[str]:
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for item in raw_keys:
+            key = str(item or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(key)
+        return normalized
+
+    @staticmethod
+    def _mask_key(key: str) -> str:
+        if not key:
+            return "<empty>"
+        if len(key) <= 10:
+            return f"{key[:3]}***"
+        return f"{key[:6]}...{key[-4:]}"
 
     def _cache_key(self, text: str, task: str) -> str:
         payload = f"{self.model}|{task}|{text}".encode("utf-8")
@@ -377,12 +431,12 @@ class EmbeddingClient:
             payload["dimensions"] = self.dimensions
         return payload
 
-    async def _embed_once(self, cleaned: str, task: str) -> list[float]:
+    async def _embed_once(self, cleaned: str, task: str, api_key: str) -> list[float]:
         url = self._embedding_url()
         payload = self._build_payload(cleaned, task)
         timeout = aiohttp.ClientTimeout(total=self.timeout_sec)
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
 
@@ -390,9 +444,7 @@ class EmbeddingClient:
             async with session.post(url, headers=headers, json=payload) as resp:
                 if resp.status >= 400:
                     detail = await resp.text()
-                    raise RuntimeError(
-                        f"embedding request failed ({resp.status}): {detail[:300]}"
-                    )
+                    raise EmbeddingRequestError(resp.status, detail)
                 data = await resp.json()
 
         items = data.get("data") or []
@@ -409,6 +461,59 @@ class EmbeddingClient:
             )
         return vector
 
+    async def _embed_with_retry(self, cleaned: str, task: str) -> list[float]:
+        attempts = 1
+        if self.retry_on_rate_limit and len(self.api_keys) > 1:
+            attempts = min(len(self.api_keys), 8)
+
+        last_exc: Exception | None = None
+        for offset in range(attempts):
+            idx = (self._key_cursor + offset) % len(self.api_keys)
+            key = self.api_keys[idx]
+            try:
+                vector = await self._embed_once(cleaned, task, key)
+                # Round-robin on success to distribute load across key pool.
+                self._key_cursor = (idx + 1) % len(self.api_keys)
+                return vector
+            except EmbeddingRequestError as exc:
+                last_exc = exc
+                should_rotate = (
+                    self.retry_on_rate_limit
+                    and len(self.api_keys) > 1
+                    and offset < attempts - 1
+                    and (exc.is_rate_limited or exc.status >= 500)
+                )
+                if should_rotate:
+                    next_idx = (idx + 1) % len(self.api_keys)
+                    self._key_cursor = next_idx
+                    logger.warning(
+                        f"{PLUGIN_NAME}: embedding request throttled/failed on key "
+                        f"{self._mask_key(key)}, rotating to next key."
+                    )
+                    await asyncio.sleep(min(0.8 + 0.2 * offset, 2.0))
+                    continue
+                break
+            except Exception as exc:
+                last_exc = exc
+                should_rotate = (
+                    self.retry_on_rate_limit
+                    and len(self.api_keys) > 1
+                    and offset < attempts - 1
+                )
+                if should_rotate:
+                    next_idx = (idx + 1) % len(self.api_keys)
+                    self._key_cursor = next_idx
+                    logger.warning(
+                        f"{PLUGIN_NAME}: embedding request exception on key "
+                        f"{self._mask_key(key)} ({type(exc).__name__}), rotating."
+                    )
+                    await asyncio.sleep(min(0.5 + 0.2 * offset, 1.5))
+                    continue
+                break
+
+        assert last_exc is not None
+        raise last_exc
+
     async def _embed(self, text: str, task: str) -> list[float]:
         cleaned = (text or "").strip()
         if not cleaned:
@@ -420,7 +525,7 @@ class EmbeddingClient:
             return cached
 
         try:
-            vector = await self._embed_once(cleaned, task)
+            vector = await self._embed_with_retry(cleaned, task)
         except Exception as exc:
             msg = str(exc)
             if not self.auto_chunking or not is_context_length_error(msg):
@@ -771,6 +876,7 @@ class MemoryRetriever:
         rerank_model: str = DEFAULT_RERANK_MODEL,
         rerank_endpoint: str = DEFAULT_RERANK_ENDPOINT,
         rerank_timeout_sec: int = 8,
+        access_boost_weight: float = 0.08,
     ) -> None:
         self.store = store
         self.embedder = embedder
@@ -792,6 +898,9 @@ class MemoryRetriever:
         self.rerank_model = rerank_model.strip() or DEFAULT_RERANK_MODEL
         self.rerank_endpoint = rerank_endpoint.strip() or DEFAULT_RERANK_ENDPOINT
         self.rerank_timeout_sec = max(3, int(rerank_timeout_sec or 8))
+        self.access_boost_weight = max(0.0, min(0.3, float(access_boost_weight)))
+        self._access_stats: OrderedDict[str, tuple[int, float]] = OrderedDict()
+        self._access_stats_limit = 5000
 
     async def retrieve(
         self,
@@ -1001,6 +1110,7 @@ class MemoryRetriever:
         processed = self._apply_importance_weight(processed)
         processed = self._apply_length_normalization(processed)
         processed = self._apply_time_decay(processed)
+        processed = self._apply_access_boost(processed)
         processed = [item for item in processed if item.score >= self.hard_min_score]
 
         if self.filter_noise:
@@ -1008,6 +1118,48 @@ class MemoryRetriever:
 
         processed = self._deduplicate(processed)
         return processed[:limit]
+
+    def register_access(self, memory_ids: list[str]) -> None:
+        if not memory_ids:
+            return
+        now = time.time()
+        for memory_id in memory_ids:
+            mem_id = (memory_id or "").strip()
+            if not mem_id:
+                continue
+            count, _last = self._access_stats.get(mem_id, (0, 0.0))
+            self._access_stats[mem_id] = (count + 1, now)
+            self._access_stats.move_to_end(mem_id)
+
+        while len(self._access_stats) > self._access_stats_limit:
+            self._access_stats.popitem(last=False)
+
+    def _apply_access_boost(self, items: list[RetrievalResult]) -> list[RetrievalResult]:
+        if self.access_boost_weight <= 0 or not self._access_stats:
+            return items
+
+        now = time.time()
+        boosted: list[RetrievalResult] = []
+        for item in items:
+            count, last_ts = self._access_stats.get(item.entry.id, (0, 0.0))
+            if count <= 0:
+                boosted.append(item)
+                continue
+
+            count_factor = min(1.0, math.log1p(count) / math.log(10))
+            freshness = math.exp(-max(0.0, now - last_ts) / 86_400.0)
+            boost = self.access_boost_weight * (0.7 * count_factor + 0.3 * freshness)
+
+            boosted.append(
+                RetrievalResult(
+                    entry=item.entry,
+                    score=max(0.0, min(1.0, item.score + boost)),
+                    sources=item.sources,
+                )
+            )
+
+        boosted.sort(key=lambda x: x.score, reverse=True)
+        return boosted
 
     def _apply_recency_boost(self, items: list[RetrievalResult]) -> list[RetrievalResult]:
         if self.recency_half_life_days <= 0 or self.recency_weight <= 0:
@@ -1206,9 +1358,24 @@ def normalize_retrieval_query(text: str) -> str:
     q = (text or "").strip()
     if not q:
         return q
+
     # Strip OpenClaw-style timestamp wrappers: "[Mon 2026-03-02 04:21 GMT+8] ..."
     q = re.sub(r"^\[[A-Za-z]{3}\s+\d{4}-\d{2}-\d{2}[^\]]*\]\s*", "", q)
-    return q.strip()
+    # Strip simple role prefixes often carried by relay/chat logs.
+    q = re.sub(
+        r"^(user|assistant|system|用户|助手|系统|human|ai)\s*[:：]\s*",
+        "",
+        q,
+        flags=re.IGNORECASE,
+    )
+    # Strip quote wrappers like "[引用消息]" prefix.
+    q = re.sub(r"^\[(引用消息|quoted message)\]\s*", "", q, flags=re.IGNORECASE)
+    # Remove transient XML/HTML-like wrappers that are not user intent.
+    q = re.sub(r"</?(relevant-memories|memory|context|system|assistant)[^>]*>", " ", q, flags=re.IGNORECASE)
+    # Collapse whitespace/newlines.
+    q = q.replace("\r", " ").replace("\n", " ")
+    q = re.sub(r"\s+", " ", q).strip()
+    return q
 
 
 def sanitize_for_context(text: str) -> str:
@@ -1225,6 +1392,39 @@ def clamp01(value: float, fallback: float = 0.0) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def parse_api_key_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        raw_items = [str(item or "").strip() for item in value]
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        parsed_json: list[str] = []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                loaded = json.loads(text)
+                if isinstance(loaded, list):
+                    parsed_json = [str(item or "").strip() for item in loaded]
+            except Exception:
+                parsed_json = []
+        if parsed_json:
+            raw_items = parsed_json
+        else:
+            raw_items = [item.strip() for item in re.split(r"[\r\n,;]+", text)]
+
+    seen: set[str] = set()
+    keys: list[str] = []
+    for item in raw_items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        keys.append(item)
+    return keys
+
+
 class MemoryLanceDBPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | dict | None = None) -> None:
         super().__init__(context, config)
@@ -1239,7 +1439,9 @@ class MemoryLanceDBPlugin(Star):
         self._retriever: MemoryRetriever | None = None
 
         self._embedding_api_key_cache: str | None = None
+        self._embedding_api_keys_cache: list[str] | None = None
         self._rerank_api_key_cache: str | None = None
+        self._recent_recall_history: dict[str, OrderedDict[str, float]] = {}
 
         logger.info(f"{PLUGIN_NAME}: initialized")
 
@@ -1290,6 +1492,46 @@ class MemoryLanceDBPlugin(Star):
 
         return ""
 
+    async def _get_secret_list(
+        self,
+        *,
+        config_key: str,
+        kv_key: str,
+        cache_attr: str,
+    ) -> list[str]:
+        cached = getattr(self, cache_attr, None)
+        if isinstance(cached, list) and cached:
+            return [str(item) for item in cached]
+
+        config_value = self._cfg(config_key, "")
+        config_keys = parse_api_key_list(config_value)
+        if config_keys:
+            if bool(self._cfg("store_api_key_in_kv", True)):
+                try:
+                    await self.put_kv_data(kv_key, json.dumps(config_keys, ensure_ascii=False))
+                    if self.config is not None:
+                        try:
+                            self.config[config_key] = ""
+                            if hasattr(self.config, "save_config"):
+                                self.config.save_config()
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    logger.warning(f"{PLUGIN_NAME}: failed to put {config_key} into kv ({exc})")
+            setattr(self, cache_attr, config_keys)
+            return config_keys
+
+        try:
+            stored = await self.get_kv_data(kv_key, "")
+            stored_keys = parse_api_key_list(stored)
+            if stored_keys:
+                setattr(self, cache_attr, stored_keys)
+                return stored_keys
+        except Exception:
+            pass
+
+        return []
+
     async def _ensure_ready(self) -> None:
         if self._ready:
             return
@@ -1303,8 +1545,15 @@ class MemoryLanceDBPlugin(Star):
                 kv_key="embedding_api_key",
                 cache_attr="_embedding_api_key_cache",
             )
-            if not embedding_api_key:
+            extra_embedding_keys = await self._get_secret_list(
+                config_key="embedding_api_keys",
+                kv_key="embedding_api_keys",
+                cache_attr="_embedding_api_keys_cache",
+            )
+            all_embedding_keys = parse_api_key_list([embedding_api_key, *extra_embedding_keys])
+            if not all_embedding_keys:
                 raise RuntimeError("embedding_api_key is required")
+            embedding_api_key = all_embedding_keys[0]
 
             rerank_api_key = await self._get_secret(
                 config_key="rerank_api_key",
@@ -1341,6 +1590,7 @@ class MemoryLanceDBPlugin(Star):
 
             self._embedder = EmbeddingClient(
                 api_key=embedding_api_key,
+                api_keys=all_embedding_keys,
                 model=embed_model,
                 base_url=embed_base_url,
                 dimensions=embed_dims,
@@ -1349,6 +1599,7 @@ class MemoryLanceDBPlugin(Star):
                 normalized=normalized,
                 timeout_sec=embed_timeout,
                 auto_chunking=embed_chunking,
+                retry_on_rate_limit=bool(self._cfg("retry_on_rate_limit", True)),
             )
             self._store = LanceMemoryStore(db_path=db_path, vector_dim=embed_dims)
 
@@ -1371,6 +1622,7 @@ class MemoryLanceDBPlugin(Star):
                 rerank_model=str(self._cfg("rerank_model", DEFAULT_RERANK_MODEL) or DEFAULT_RERANK_MODEL),
                 rerank_endpoint=str(self._cfg("rerank_endpoint", DEFAULT_RERANK_ENDPOINT) or DEFAULT_RERANK_ENDPOINT),
                 rerank_timeout_sec=int(self._cfg("rerank_timeout_sec", 8) or 8),
+                access_boost_weight=float(self._cfg("access_boost_weight", 0.08) or 0.08),
             )
 
             # Warm table init so startup failures surface early.
@@ -1409,6 +1661,73 @@ class MemoryLanceDBPlugin(Star):
             )
         return [requested]
 
+    def _prune_recent_recall_bucket(
+        self,
+        bucket: OrderedDict[str, float],
+        *,
+        now: float,
+        window_sec: float,
+        max_size: int,
+    ) -> None:
+        if window_sec > 0:
+            expired = [mid for mid, ts in bucket.items() if now - ts > window_sec]
+            for mid in expired:
+                bucket.pop(mid, None)
+        while len(bucket) > max_size:
+            bucket.popitem(last=False)
+
+    def _filter_recent_recalls(
+        self,
+        event: AstrMessageEvent,
+        results: list[RetrievalResult],
+    ) -> list[RetrievalResult]:
+        if not bool(self._cfg("recall_cross_turn_dedup", True)):
+            return results
+        if not results:
+            return results
+
+        window_sec = max(0, int(self._cfg("recall_dedup_window_sec", 600) or 600))
+        if window_sec <= 0:
+            return results
+
+        key = event.unified_msg_origin
+        bucket = self._recent_recall_history.setdefault(key, OrderedDict())
+        now = time.time()
+        self._prune_recent_recall_bucket(
+            bucket,
+            now=now,
+            window_sec=float(window_sec),
+            max_size=500,
+        )
+        return [item for item in results if item.entry.id not in bucket]
+
+    def _mark_recent_recalls(
+        self,
+        event: AstrMessageEvent,
+        results: list[RetrievalResult],
+    ) -> None:
+        if not bool(self._cfg("recall_cross_turn_dedup", True)):
+            return
+        if not results:
+            return
+
+        window_sec = max(0, int(self._cfg("recall_dedup_window_sec", 600) or 600))
+        if window_sec <= 0:
+            return
+
+        key = event.unified_msg_origin
+        bucket = self._recent_recall_history.setdefault(key, OrderedDict())
+        now = time.time()
+        for item in results:
+            bucket[item.entry.id] = now
+            bucket.move_to_end(item.entry.id)
+        self._prune_recent_recall_bucket(
+            bucket,
+            now=now,
+            window_sec=float(window_sec),
+            max_size=500,
+        )
+
     async def _store_memory(
         self,
         *,
@@ -1429,9 +1748,21 @@ class MemoryLanceDBPlugin(Star):
 
         vector = await self._embedder.embed_passage(cleaned)
 
-        existing = self._store.vector_search(vector, limit=1, min_score=0.1, scopes=[scope])
-        if existing and existing[0].score >= duplicate_threshold:
-            return "duplicate", existing[0].entry
+        if duplicate_threshold > 0:
+            try:
+                existing = self._store.vector_search(
+                    vector,
+                    limit=1,
+                    min_score=0.1,
+                    scopes=[scope],
+                )
+                if existing and existing[0].score >= duplicate_threshold:
+                    return "duplicate", existing[0].entry
+            except Exception as exc:
+                # Fail-open: write memory even if pre-dedup lookup fails.
+                logger.warning(
+                    f"{PLUGIN_NAME}: duplicate precheck failed, continue storing ({exc})"
+                )
 
         entry = self._store.store(
             OmitMemoryEntry(
@@ -1481,6 +1812,7 @@ class MemoryLanceDBPlugin(Star):
                 limit=recall_limit,
                 scopes=scope_filter,
             )
+            results = self._filter_recent_recalls(event, results)
             if not results:
                 return
 
@@ -1508,6 +1840,8 @@ class MemoryLanceDBPlugin(Star):
             else:
                 req.system_prompt = injection
 
+            self._mark_recent_recalls(event, results)
+            self._retriever.register_access([item.entry.id for item in results])
             logger.info(
                 f"{PLUGIN_NAME}: injected {len(results)} memories for {event.unified_msg_origin}"
             )
@@ -1618,6 +1952,7 @@ class MemoryLanceDBPlugin(Star):
             if not results:
                 return "No relevant memories found."
 
+            self._retriever.register_access([item.entry.id for item in results])
             lines = []
             for idx, item in enumerate(results, 1):
                 lines.append(

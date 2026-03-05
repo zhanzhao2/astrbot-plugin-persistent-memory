@@ -5,6 +5,12 @@
     "hint": "Will be moved to plugin KV store when store_api_key_in_kv=true",
     "default": ""
   },
+  "embedding_api_keys": {
+    "type": "string",
+    "description": "Additional embedding API keys, separated by comma/newline",
+    "hint": "Will be moved to plugin KV store when store_api_key_in_kv=true",
+    "default": ""
+  },
   "store_api_key_in_kv": {
     "type": "bool",
     "description": "Store API keys in plugin KV storage",
@@ -48,6 +54,11 @@
   "embedding_chunking": {
     "type": "bool",
     "description": "Enable automatic chunking fallback when text exceeds embedding context length",
+    "default": true
+  },
+  "retry_on_rate_limit": {
+    "type": "bool",
+    "description": "Rotate to next embedding key when rate-limited or throttled",
     "default": true
   },
   "enable_rerank": {
@@ -102,6 +113,16 @@
     "description": "Minimum prompt length to trigger auto recall (1-200).",
     "default": 15
   },
+  "recall_cross_turn_dedup": {
+    "type": "bool",
+    "description": "Avoid injecting the same memory repeatedly across nearby turns",
+    "default": true
+  },
+  "recall_dedup_window_sec": {
+    "type": "int",
+    "description": "Cross-turn dedup window in seconds",
+    "default": 600
+  },
   "recall_limit": {
     "type": "int",
     "description": "Number of memories injected each turn",
@@ -131,6 +152,11 @@
     "type": "int",
     "description": "Candidate pool size before rerank",
     "default": 20
+  },
+  "access_boost_weight": {
+    "type": "string",
+    "description": "Lightweight access boost weight in [0.0, 0.3]",
+    "default": "0.08"
   },
   "recency_half_life_days": {
     "type": "int",

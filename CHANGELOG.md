@@ -1,5 +1,13 @@
 # 变更记录
 
+## v0.4.0
+
+1. 合并上游 v1.0.24 / v1.0.25 思路：新增 `embedding_api_keys` 多 Key 轮转与 `retry_on_rate_limit` 限流重试切换。
+2. 合并上游 v1.0.28 思路：自动召回增加跨轮次去重（`recall_cross_turn_dedup` + `recall_dedup_window_sec`）。
+3. 合并上游 v1.0.29 思路：增强 `normalize_retrieval_query`，清洗角色前缀、引用标记和包装标签。
+4. 合并上游 v1.0.30 思路：写入去重预检失败时 fail-open，继续存储并告警，降低误拦截。
+5. 合并上游 v1.0.26 思路：新增访问强化排序（按近期访问次数/时效进行轻量加权），并开放 `access_boost_weight` 配置。
+
 ## v0.3.0
 
 1. 合并上游 v1.0.21 思路：新增超长文本自动分块嵌入（`embedding_chunking`，默认开启）。

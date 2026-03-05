@@ -83,17 +83,22 @@
 
 主要配置项（常用）：
 
-1. `embedding_api_key`：Jina API Key（首次加载可自动转存到插件 KV）。
-2. `embedding_model`：嵌入模型，默认 `jina-embeddings-v5-text-small`。
-3. `rerank_model`：重排模型，默认 `jina-reranker-v2-base-multilingual`。
-4. `retrieval_mode`：`hybrid` 或 `vector`。
-5. `scope_mode`：`global` / `session` / `session+global`。
-6. `auto_recall`：是否自动召回注入。
-7. `auto_recall_min_length`：自动召回最小触发长度。
-8. `auto_capture`：是否自动捕获记忆。
-9. `capture_assistant`：是否捕获助手回复。
-10. `recall_limit`：每轮注入记忆条数上限。
-11. `embedding_chunking`：嵌入超长文本时是否自动分块并做均值向量（默认开启）。
+1. `embedding_api_key`：主 Jina API Key（首次加载可自动转存到插件 KV）。
+2. `embedding_api_keys`：额外 Jina API Key（逗号/换行分隔，支持轮转）。
+3. `retry_on_rate_limit`：限流/节流时自动切换到下一个 Key 并重试。
+4. `embedding_model`：嵌入模型，默认 `jina-embeddings-v5-text-small`。
+5. `rerank_model`：重排模型，默认 `jina-reranker-v2-base-multilingual`。
+6. `retrieval_mode`：`hybrid` 或 `vector`。
+7. `scope_mode`：`global` / `session` / `session+global`。
+8. `auto_recall`：是否自动召回注入。
+9. `auto_recall_min_length`：自动召回最小触发长度。
+10. `recall_cross_turn_dedup`：跨轮次去重，避免连续注入同一条记忆。
+11. `recall_dedup_window_sec`：跨轮次去重窗口（秒）。
+12. `access_boost_weight`：访问强化排序权重（建议 `0.0~0.3`，默认 `0.08`）。
+13. `auto_capture`：是否自动捕获记忆。
+14. `capture_assistant`：是否捕获助手回复。
+15. `recall_limit`：每轮注入记忆条数上限。
+16. `embedding_chunking`：嵌入超长文本时是否自动分块并做均值向量（默认开启）。
 
 `db_path` 在初始化时会做预校验（目录自动创建、可写性检查、符号链接检查），失败时会给出可操作的错误信息，便于快速排障。
 
