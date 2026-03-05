@@ -4,7 +4,7 @@
 
 - 插件目录（内部 ID）：`astrbot_plugin_memory_lancedb`
 - 展示名称：`astrbot持久化记忆插件`
-- 当前版本：`v0.3.0`
+- 当前版本：`v0.4.1`
 
 ## 简介
 
@@ -167,6 +167,22 @@
 本项目采用 **MIT License**，详见仓库根目录 [LICENSE](./LICENSE)。
 
 ## Release（中文）
+
+### v0.4.1
+
+1. 严格对齐上游 v1.0.26：补齐 `reinforcement_factor` / `max_half_life_multiplier`，在 `time decay` 中按 `accessCount/lastAccessedAt` 计算有效 half-life。
+2. 严格对齐上游 v1.0.26：手动 `memory_recall` 结果写回访问元数据（debounce flush），不再在 auto-recall 中记录访问强化。
+3. 严格对齐上游 v1.0.28：新增 `auto_recall_min_repeated`（按会话轮次去重间隔，默认 0）。
+4. 严格对齐上游 v1.0.29：`normalize_retrieval_query` 增强，补齐 `Conversation info/Sender (untrusted metadata)` 与 `[cron:...]` 清洗。
+5. 同步补齐配置与文档字段，确保实现与说明一致。
+
+### v0.4.0
+
+1. 合并上游 v1.0.24 / v1.0.25：新增 `embedding_api_keys` 多 Key 轮转与 `retry_on_rate_limit` 限流重试切换。
+2. 合并上游 v1.0.28：新增跨轮次去重（`recall_cross_turn_dedup` + `recall_dedup_window_sec`），减少重复注入。
+3. 合并上游 v1.0.29：增强查询归一化，清洗角色前缀、引用标记和包装标签。
+4. 合并上游 v1.0.30：写入去重预检失败时 fail-open，继续存储并告警，避免误拦截。
+5. 合并上游 v1.0.26：新增访问强化排序，并开放 `access_boost_weight` 配置。
 
 ### v0.3.0
 
