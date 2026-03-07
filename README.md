@@ -170,8 +170,8 @@
 
 ### v0.4.2
 
-1. 对齐上游 v1.0.32：`normalize_retrieval_query` 改为全局剥离 `Conversation info/Sender (untrusted metadata)` 区块。
-2. 对齐上游 v1.0.32：`should_capture` 在判定前先清理 OpenClaw metadata block，减少噪声记忆误写入。
+1. 吸收上游 v1.0.32 的去噪思路：`normalize_retrieval_query` 改为全局剥离 `Conversation info/Sender (untrusted metadata)` 这类包装区块，避免把会话外壳当成检索正文。
+2. 按 AstrBot 消息链路做本地化适配：`should_capture` 在判定前先清理同类包装元数据，减少噪声记忆误写入。
 3. `auto_recall_min_repeated` 解析漏洞在 AstrBot 版此前已规避，本次无需额外修补。
 
 ### v0.4.1
