@@ -4,7 +4,7 @@
 
 - 插件目录（内部 ID）：`astrbot_plugin_memory_lancedb`
 - 展示名称：`astrbot持久化记忆插件`
-- 当前版本：`v0.4.1`
+- 当前版本：`v0.4.2`
 
 ## 简介
 
@@ -167,6 +167,12 @@
 本项目采用 **MIT License**，详见仓库根目录 [LICENSE](./LICENSE)。
 
 ## Release（中文）
+
+### v0.4.2
+
+1. 对齐上游 v1.0.32：`normalize_retrieval_query` 改为全局剥离 `Conversation info/Sender (untrusted metadata)` 区块。
+2. 对齐上游 v1.0.32：`should_capture` 在判定前先清理 OpenClaw metadata block，减少噪声记忆误写入。
+3. `auto_recall_min_repeated` 解析漏洞在 AstrBot 版此前已规避，本次无需额外修补。
 
 ### v0.4.1
 

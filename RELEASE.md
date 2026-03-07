@@ -1,6 +1,19 @@
 # Release Notes（中文）
 
-## v0.4.1（当前版本）
+## v0.4.2（当前版本）
+
+本版本对齐上游 `memory-lancedb-pro` 的 v1.0.32，重点补齐 metadata 噪声清洗逻辑：
+
+### 补齐项
+
+1. 对齐上游 `v1.0.32`（查询归一化）：
+   - `normalize_retrieval_query` 改为全局剥离 `Conversation info/Sender (untrusted metadata)` 区块
+2. 对齐上游 `v1.0.32`（自动捕获去噪）：
+   - `should_capture` 在判定前先清理 OpenClaw metadata block，减少噪声记忆误写入
+3. 兼容性说明：
+   - `auto_recall_min_repeated` 的解析漏洞在 AstrBot 版此前已规避，本次无需新增兼容补丁
+
+## v0.4.1
 
 本版本对 v0.4.0 做“官方行为补齐”，重点收敛到上游真实提交的语义一致性：
 

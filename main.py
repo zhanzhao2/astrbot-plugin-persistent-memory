@@ -44,6 +44,10 @@ EMBEDDING_CONTEXT_LIMITS: dict[str, int] = {
 CONTEXT_ERROR_PATTERN = re.compile(r"context|too long|exceed|length|token limit", re.IGNORECASE)
 SENTENCE_ENDING_CHARS = {".", "!", "?", "。", "！", "？"}
 ACCESS_DECAY_HALF_LIFE_DAYS = 30.0
+OPENCLAW_METADATA_BLOCK_RE = re.compile(
+    r"^(Conversation info|Sender) \(untrusted metadata\):[\s\S]*?\n\s*\n",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Auto-capture triggers
 MEMORY_TRIGGERS = [
@@ -1357,6 +1361,11 @@ def should_capture(text: str) -> bool:
     if not t:
         return False
 
+    # Align with upstream v1.0.32: strip OpenClaw metadata blocks before capture checks.
+    t = OPENCLAW_METADATA_BLOCK_RE.sub("", t).strip()
+    if not t:
+        return False
+
     has_cjk = bool(re.search(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", t))
     min_len = 4 if has_cjk else 10
     if len(t) < min_len or len(t) > 500:
@@ -1398,17 +1407,8 @@ def normalize_retrieval_query(text: str) -> str:
     if not q:
         return q
 
-    # Strip OpenClaw metadata wrappers (v1.0.29 upstream behavior).
-    if re.match(r"^(Conversation info|Sender)\s*\(untrusted metadata\):", q, flags=re.IGNORECASE):
-        q = re.sub(
-            r"^(Conversation info|Sender)\s*\(untrusted metadata\):\s*",
-            "",
-            q,
-            flags=re.IGNORECASE,
-        )
-        parts = re.split(r"\n\s*\n", q, maxsplit=1)
-        if len(parts) == 2:
-            q = parts[1].strip()
+    # Align with upstream v1.0.32: strip all OpenClaw metadata blocks globally.
+    q = OPENCLAW_METADATA_BLOCK_RE.sub("", q).strip()
     # Strip OpenClaw cron wrapper prefix.
     q = re.sub(r"^\[cron:[^\]]+\]\s*", "", q, flags=re.IGNORECASE)
     # Strip OpenClaw-style timestamp wrappers: "[Mon 2026-03-02 04:21 GMT+8] ..."
